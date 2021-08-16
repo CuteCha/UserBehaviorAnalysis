@@ -179,7 +179,7 @@ object PvUvStata {
       .keyBy(_._1)
       .timeWindow(Time.hours(1))
       .trigger(new UvTrigger)
-      .process(new UvProcessFunc2)
+      .process(new UvProcessFunc3)
 
 
     pvUvStream
@@ -221,7 +221,7 @@ object PvUvStata {
     override def clear(window: TimeWindow, ctx: Trigger.TriggerContext): Unit = {}
   }
 
-  class UvProcessFunc2 extends ProcessWindowFunction[(String, Long), String, String, TimeWindow] {
+  class UvProcessFunc3 extends ProcessWindowFunction[(String, Long), String, String, TimeWindow] {
     // 连接到redis，用懒加载，只会加载一次
     lazy val jedis = new Jedis("localhost", 6379)
 
@@ -263,6 +263,7 @@ object PvUvStata {
     for (i <- 0 until value.length) {
       result = result * seed + value.charAt(i)
     }
+
     (size - 1) & result
   }
 
