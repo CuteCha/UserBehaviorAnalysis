@@ -269,6 +269,6 @@ object PvUvStata {
 
 
   def main(args: Array[String]): Unit = {
-    test03(args)
+    test02(args)
   }
 }
