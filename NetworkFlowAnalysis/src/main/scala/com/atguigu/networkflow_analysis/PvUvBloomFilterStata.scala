@@ -19,6 +19,8 @@ object PvUvBloomFilterStata {
 
   case class SidPvUvCnt(sid: Long, pv: Long, uv: Long)
 
+  case class PvUvACC(sid: Long, pv: Long, uv: Long, bloom: BloomFilter[lang.Long])
+
   def test01(args: Array[String]): Unit = {
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     env.setParallelism(8)
@@ -39,8 +41,7 @@ object PvUvBloomFilterStata {
 
 
     val pvUvStream = dataStream
-      .map(r => (r.sid, r.uid))
-      .keyBy(_._1)
+      .keyBy(_.sid)
       .timeWindow(Time.hours(1))
       .aggregate(new PvUvAggFunc, new PvUvProcFunc)
 
@@ -52,31 +53,30 @@ object PvUvBloomFilterStata {
     env.execute("uv job")
   }
 
-  class PvUvAggFunc extends AggregateFunction[(Long, Long), (Long, Long, Long, BloomFilter[lang.Long]), SidPvUvCnt] {
-    override def createAccumulator(): (Long, Long, Long, BloomFilter[lang.Long]) = {
-      (0, 0, 0, BloomFilter.create(Funnels.longFunnel(), 1000, 0.01))
+  class PvUvAggFunc extends AggregateFunction[UserBehavior, PvUvACC, SidPvUvCnt] {
+    override def createAccumulator(): PvUvACC = {
+      PvUvACC(0, 0, 0, BloomFilter.create(Funnels.longFunnel(), 1000, 0.01))
     }
 
-    override def add(in: (Long, Long),
-                     acc: (Long, Long, Long, BloomFilter[lang.Long])): (Long, Long, Long, BloomFilter[lang.Long]) = {
-      var bloom = acc._4
-      var uv = acc._3
-      val pv = acc._2 + 1
+    override def add(in: UserBehavior, acc: PvUvACC): PvUvACC = {
+      var bloom = acc.bloom
+      var uv = acc.uv
+      val pv = acc.pv + 1
+      val sid = if (acc.sid == 0) in.sid else acc.sid
 
-      if (!bloom.mightContain(in._2)) {
-        bloom.put(in._2)
+      if (!bloom.mightContain(in.uid)) {
+        bloom.put(in.uid)
         uv += 1
       }
 
-      (in._1, pv, uv, bloom)
+      PvUvACC(sid, pv, uv, bloom)
     }
 
-    override def getResult(acc: (Long, Long, Long, BloomFilter[lang.Long])): SidPvUvCnt = {
-      SidPvUvCnt(acc._1, acc._2, acc._3)
+    override def getResult(acc: PvUvACC): SidPvUvCnt = {
+      SidPvUvCnt(acc.sid, acc.pv, acc.uv)
     }
 
-    override def merge(acc: (Long, Long, Long, BloomFilter[lang.Long]),
-                       acc1: (Long, Long, Long, BloomFilter[lang.Long])): (Long, Long, Long, BloomFilter[lang.Long]) = ???
+    override def merge(acc: PvUvACC, acc1: PvUvACC): PvUvACC = ???
   }
 
   class PvUvProcFunc extends ProcessWindowFunction[SidPvUvCnt, String, Long, TimeWindow] {
