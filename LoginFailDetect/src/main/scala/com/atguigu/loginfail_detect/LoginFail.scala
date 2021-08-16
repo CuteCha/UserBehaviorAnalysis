@@ -35,7 +35,8 @@ object LoginFail {
         val arr = line.split(",")
         UserLoginEvent(arr(0).toLong, arr(1), arr(2), arr(3).toLong)
       } )
-      .assignTimestampsAndWatermarks(new BoundedOutOfOrdernessTimestampExtractor[UserLoginEvent](Time.seconds(3)) {
+      .assignTimestampsAndWatermarks(
+        new BoundedOutOfOrdernessTimestampExtractor[UserLoginEvent](Time.seconds(3)) {
         override def extractTimestamp(element: UserLoginEvent): Long = element.timestamp * 1000L
       })
 

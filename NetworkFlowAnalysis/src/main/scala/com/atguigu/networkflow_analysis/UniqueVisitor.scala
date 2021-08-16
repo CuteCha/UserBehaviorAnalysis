@@ -9,14 +9,14 @@ import org.apache.flink.streaming.api.windowing.windows.TimeWindow
 import org.apache.flink.util.Collector
 
 /**
-  * Copyright (c) 2018-2028 尚硅谷 All Rights Reserved 
-  *
-  * Project: UserBehaviorAnalysis
-  * Package: com.atguigu.networkflow_analysis
-  * Version: 1.0
-  *
-  * Created by wushengran on 2020/9/7 13:56
-  */
+ * Copyright (c) 2018-2028 尚硅谷 All Rights Reserved
+ *
+ * Project: UserBehaviorAnalysis
+ * Package: com.atguigu.networkflow_analysis
+ * Version: 1.0
+ *
+ * Created by wushengran on 2020/9/7 13:56
+ */
 
 // 输出数据样例类
 case class UvCount(windowEnd: Long, count: Long)
@@ -39,10 +39,10 @@ object UniqueVisitor {
       .assignAscendingTimestamps(_.timestamp * 1000L)
 
     val uvStream = dataStream
-      .filter( _.behavior == "pv" )
-      .timeWindowAll( Time.hours(1) )
-//      .apply( new UvCountResult() )
-      .aggregate( new UvCountAgg(), new UvCountAggResult() )
+      .filter(_.behavior == "pv")
+      .timeWindowAll(Time.hours(1))
+      //.apply( new UvCountResult() )
+      .aggregate(new UvCountAgg(), new UvCountAggResult())
 
     uvStream.print()
 
@@ -51,19 +51,22 @@ object UniqueVisitor {
 }
 
 // 实现自定义的WindowFunction
-class UvCountResult() extends AllWindowFunction[UserBehavior, UvCount, TimeWindow]{
+class UvCountResult() extends AllWindowFunction[UserBehavior, UvCount, TimeWindow] {
   override def apply(window: TimeWindow, input: Iterable[UserBehavior], out: Collector[UvCount]): Unit = {
     // 用一个set集合类型，来保存所有的userId，自动去重
     var idSet = Set[Long]()
-    for( userBehavior <- input )
+    for (userBehavior <- input)
       idSet += userBehavior.userId
 
     // 输出set的大小
-    out.collect( UvCount(window.getEnd, idSet.size) )
+    out.collect(UvCount(window.getEnd, idSet.size))
+
+    //val uidSet = input.map(_.userId).toSet
+    //out.collect(UvCount(window.getEnd, uidSet.size))
   }
 }
 
-class UvCountAgg() extends AggregateFunction[UserBehavior, Set[Long], Long]{
+class UvCountAgg() extends AggregateFunction[UserBehavior, Set[Long], Long] {
   override def add(value: UserBehavior, accumulator: Set[Long]): Set[Long] = accumulator + value.userId
 
   override def createAccumulator(): Set[Long] = Set[Long]()
@@ -73,8 +76,8 @@ class UvCountAgg() extends AggregateFunction[UserBehavior, Set[Long], Long]{
   override def merge(a: Set[Long], b: Set[Long]): Set[Long] = a ++ b
 }
 
-class UvCountAggResult() extends AllWindowFunction[Long, UvCount, TimeWindow]{
+class UvCountAggResult() extends AllWindowFunction[Long, UvCount, TimeWindow] {
   override def apply(window: TimeWindow, input: Iterable[Long], out: Collector[UvCount]): Unit = {
-    out.collect( UvCount(window.getEnd, input.head) )
+    out.collect(UvCount(window.getEnd, input.head))
   }
 }
