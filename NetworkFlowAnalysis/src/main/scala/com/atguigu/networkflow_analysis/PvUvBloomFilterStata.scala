@@ -11,6 +11,7 @@ import org.apache.flink.streaming.api.windowing.triggers.{Trigger, TriggerResult
 import org.apache.flink.util.Collector
 
 import java.lang
+import java.nio.charset.Charset
 import java.sql.Timestamp
 
 object PvUvBloomFilterStata {
@@ -88,8 +89,81 @@ object PvUvBloomFilterStata {
     }
   }
 
+  case class UserBehavior02(uid: String, sid: String, cid: String, behavior: String, ts: Long)
+
+  case class SidPvUvCnt02(sid: String, pv: Long, uv: Long)
+
+  case class PvUvACC02(sid: String, pv: Long, uv: Long, bloom: BloomFilter[lang.String])
+
+  def test02(args: Array[String]): Unit = {
+    val env = StreamExecutionEnvironment.getExecutionEnvironment
+    env.setParallelism(8)
+    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
+
+    // 读取数据并转换成样例类类型，并且提取时间戳设置watermark
+    val resource = getClass.getResource("/UserBehavior.csv")
+    val inputStream: DataStream[String] = env.readTextFile(resource.getPath)
+    //val inputStream = env.socketTextStream("localhost", 9999).filter(_.trim.nonEmpty)
+
+    val dataStream = inputStream
+      .map(line => {
+        val arr = line.split(",")
+        UserBehavior02(arr(0), arr(1), arr(2), arr(3), arr(4).toLong * 1000L)
+      })
+      .filter(_.behavior == "pv")
+      .assignAscendingTimestamps(_.ts)
+
+
+    val pvUvStream = dataStream
+      .keyBy(_.sid)
+      .timeWindow(Time.hours(1))
+      .aggregate(new PvUvAggFunc02, new PvUvProcFunc02)
+
+
+    pvUvStream
+      //.filter(r => (r.uv > 1) && (r.pv > r.uv))
+      .print()
+
+    env.execute("uv job")
+  }
+
+  class PvUvAggFunc02 extends AggregateFunction[UserBehavior02, PvUvACC02, SidPvUvCnt02] {
+    override def createAccumulator(): PvUvACC02 = {
+      PvUvACC02("", 0, 0, BloomFilter.create(Funnels.stringFunnel(Charset.defaultCharset()), 1000, 0.01))
+    }
+
+    override def add(in: UserBehavior02, acc: PvUvACC02): PvUvACC02 = {
+      var bloom = acc.bloom
+      var uv = acc.uv
+      val pv = acc.pv + 1
+      val sid = if (acc.sid.isEmpty) in.sid else acc.sid
+
+      if (!bloom.mightContain(in.uid)) {
+        bloom.put(in.uid)
+        uv += 1
+      }
+
+      PvUvACC02(sid, pv, uv, bloom)
+    }
+
+    override def getResult(acc: PvUvACC02): SidPvUvCnt02 = {
+      SidPvUvCnt02(acc.sid, acc.pv, acc.uv)
+    }
+
+    override def merge(acc: PvUvACC02, acc1: PvUvACC02): PvUvACC02 = ???
+  }
+
+  class PvUvProcFunc02 extends ProcessWindowFunction[SidPvUvCnt02, String, String, TimeWindow] {
+    override def process(key: String, context: Context, elements: Iterable[SidPvUvCnt02], out: Collector[String]): Unit = {
+      val start = new Timestamp(context.window.getStart)
+      val end = new Timestamp(context.window.getEnd)
+      val sidPvUvCnt = elements.head
+      out.collect(s"start-$start ~ end-$end: sid-${sidPvUvCnt.sid}; pv-${sidPvUvCnt.pv}; uv-${sidPvUvCnt.uv};")
+    }
+  }
+
   def main(args: Array[String]): Unit = {
-    test01(args)
+    test02(args)
   }
 
 }
