@@ -1,10 +1,12 @@
 package com.atguigu.networkflow_analysis
 
 import org.apache.flink.api.common.functions.AggregateFunction
+import org.apache.flink.configuration.Configuration
 import org.apache.flink.shaded.guava18.com.google.common.hash.{BloomFilter, Funnels}
 import org.apache.flink.streaming.api.TimeCharacteristic
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction
 import org.apache.flink.streaming.api.scala._
-import org.apache.flink.streaming.api.scala.function.ProcessWindowFunction
+import org.apache.flink.streaming.api.scala.function.{ProcessWindowFunction, WindowFunction}
 import org.apache.flink.streaming.api.windowing.time.Time
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow
 import org.apache.flink.streaming.api.windowing.triggers.{Trigger, TriggerResult}
@@ -14,7 +16,8 @@ import redis.clients.util.MurmurHash
 
 import java.lang
 import java.nio.charset.Charset
-import java.sql.Timestamp
+import java.sql.{Date, Timestamp}
+import java.text.SimpleDateFormat
 import scala.collection.JavaConverters._
 
 object PvUvBloomFilterStata {
@@ -88,7 +91,7 @@ object PvUvBloomFilterStata {
       val start = new Timestamp(context.window.getStart)
       val end = new Timestamp(context.window.getEnd)
       val sidPvUvCnt = elements.head
-      out.collect(s"start-$start ~ end-$end: sid-${sidPvUvCnt.sid}; pv-${sidPvUvCnt.pv}; uv-${sidPvUvCnt.uv};")
+      out.collect(s"$end: sid-${sidPvUvCnt.sid}; pv-${sidPvUvCnt.pv}; uv-${sidPvUvCnt.uv};")
     }
   }
 
@@ -444,17 +447,118 @@ object PvUvBloomFilterStata {
 
   }
 
+  def test06(args: Array[String]): Unit = {
+    val env = StreamExecutionEnvironment.getExecutionEnvironment
+    env.setParallelism(8)
+    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
+
+    // 读取数据并转换成样例类类型，并且提取时间戳设置watermark
+    val resource = getClass.getResource("/UserBehavior.csv")
+    val inputStream: DataStream[String] = env.readTextFile(resource.getPath)
+    //val inputStream = env.socketTextStream("localhost", 9999).filter(_.trim.nonEmpty)
+
+    val dataStream = inputStream
+      .map(line => {
+        val arr = line.split(",")
+        UserBehavior02(arr(0), arr(1), arr(2), arr(3), arr(4).toLong * 1000L)
+      })
+      .filter(_.behavior == "pv")
+      .assignAscendingTimestamps(_.ts)
+
+
+    val pvUvStream = dataStream
+      .keyBy(_.sid)
+      .timeWindow(Time.hours(24))
+      .aggregate(new PvUvAgg06, new PvUvWindFunc06)
+
+
+    pvUvStream
+      .filter(r => (r.pv > 30))
+      .print()
+
+    env.execute("uv job")
+  }
+
+  case class PvUvACC06(sid: String, uid: String, pv: Long, uv: Long)
+
+  case class PvUvOUT06(dt: String, sid: String, pv: Long, uv: Long)
+
+  class PvUvAgg06 extends AggregateFunction[UserBehavior02, PvUvACC06, PvUvACC06] {
+    override def createAccumulator(): PvUvACC06 = PvUvACC06("", "", 0, 0)
+
+    override def add(in: UserBehavior02, acc: PvUvACC06): PvUvACC06 = {
+      val sid = if (acc.sid.nonEmpty) acc.sid else in.sid
+      val uid = in.uid
+      val pv = acc.pv + 1
+      val uv = acc.uv
+
+      PvUvACC06(sid, uid, pv, uv)
+    }
+
+    override def getResult(acc: PvUvACC06): PvUvACC06 = acc
+
+    override def merge(acc: PvUvACC06, acc1: PvUvACC06): PvUvACC06 = {
+      PvUvACC06("", acc.sid, acc.pv + acc1.pv, 0)
+    }
+  }
+
+  class PvUvWindFunc06 extends WindowFunction[PvUvACC06, PvUvOUT06, String, TimeWindow] {
+    lazy val jedis = RedisTools.getPool.getResource
+
+    override def apply(key: String,
+                       window: TimeWindow,
+                       input: Iterable[PvUvACC06],
+                       out: Collector[PvUvOUT06]): Unit = {
+      val windowEnd = window.getEnd
+      val dt = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new Date(windowEnd))
+      val record = input.head
+      val sid = record.sid
+      val uid = record.uid
+      val pv = record.pv + 1
+      val uvKey = s"${windowEnd}_$sid"
+
+      //val incUv = jedis.sadd(uvKey, uid)
+      //val uv = record.uv + incUv
+      //jedis.expire(uvKey, 6000)
+
+      out.collect(PvUvOUT06(dt, sid, pv, record.uv))
+
+    }
+  }
+
+  class PvUvProcFunc06 extends ProcessWindowFunction[UserBehavior02, String, String, TimeWindow] {
+    var jedis: Jedis = _
+
+    override def open(parameters: Configuration): Unit = {
+      super.open(parameters)
+      jedis = RedisTools.getPool.getResource
+    }
+
+    override def process(key: String,
+                         context: Context,
+                         elements: Iterable[UserBehavior02],
+                         out: Collector[String]): Unit = {
+      val userBehavior = elements.head
+      val uid = userBehavior.uid
+      val sid = userBehavior.sid
+      val windowEnd = context.window.getEnd
+
+
+    }
+  }
+
   def debug(args: Array[String]): Unit = {
-    val jedis = new Jedis("localhost", 6379)
-    val uvMap = jedis.hgetAll("uv_cnt")
-    uvMap.asScala.foreach(x => println(s"sid:${x._1}; uv: ${x._2}"))
-    println(uvMap.get("s1"))
-    println(math.pow(2, 20))
+    //val jedis = new Jedis("localhost", 6379)
+    //val uvMap = jedis.hgetAll("uv_cnt")
+    //uvMap.asScala.foreach(x => println(s"sid:${x._1}; uv: ${x._2}"))
+    //println(uvMap.get("s1"))
+    //println(math.pow(2, 20))
     println(1 << 20)
+    println(math.pow(2, 32))
   }
 
   def main(args: Array[String]): Unit = {
-    test031(args)
+    test06(args)
   }
 
 }
