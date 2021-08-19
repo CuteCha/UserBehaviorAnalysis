@@ -19,9 +19,16 @@ import java.nio.charset.Charset
 import java.sql.{Date, Timestamp}
 import java.text.SimpleDateFormat
 import com.google.gson.Gson
+import org.apache.flink.core.fs.Path
+import org.apache.flink.api.common.serialization.SimpleStringEncoder
+import org.apache.flink.streaming.api.functions.sink.filesystem.StreamingFileSink
+
+import java.io.File
 import scala.collection.JavaConverters._
 
 object PvUvCal {
+  val gson = new Gson
+
   case class UserBehavior(uid: String, sid: String, cid: String, behavior: String, ts: Long)
 
   case class PvUvOUT(dt: String, sid: String, pv: Long, uv: Long)
@@ -32,6 +39,22 @@ object PvUvCal {
 
   def dtToTs(dt: String): Long = {
     new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").parse(dt).getTime
+  }
+
+  def getOutPath(dir: String): String = {
+    val file = new File(s"logs/${dir}")
+
+    file.getAbsolutePath
+  }
+
+  def getFileSink(dir: String): StreamingFileSink[String] = {
+    val outputDir = getOutPath(dir)
+    val sink: StreamingFileSink[String] = StreamingFileSink
+      .forRowFormat(new Path(outputDir),
+        new SimpleStringEncoder[String]("UTF-8"))
+      .build()
+
+    sink
   }
 
   def getEnv(): StreamExecutionEnvironment = {
@@ -75,10 +98,11 @@ object PvUvCal {
       .filter(r => (r.uv > 1) && (r.pv > r.uv))
       .print()
 
-
+    val sink: StreamingFileSink[String] = getFileSink("uvSetSata")
     pvUvStream
       .filter(r => (r.uv > 1) && (r.pv > r.uv))
-      .map(x=>)
+      .map(x => gson.toJson(x))
+      .addSink(sink)
 
     env.execute("uv job")
 
