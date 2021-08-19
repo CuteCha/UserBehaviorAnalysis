@@ -22,6 +22,7 @@ import com.google.gson.Gson
 import org.apache.flink.core.fs.Path
 import org.apache.flink.api.common.serialization.SimpleStringEncoder
 import org.apache.flink.streaming.api.functions.sink.filesystem.StreamingFileSink
+import org.roaringbitmap.RoaringBitmap
 
 import java.io.File
 import scala.collection.JavaConverters._
@@ -91,7 +92,7 @@ object PvUvCal {
     val pvUvStream = dataStream
       .keyBy(_.sid)
       .timeWindow(Time.days(1))
-      .aggregate(new PvUvSetAggFunc, new PvUvSetWindowFunc)
+      .aggregate(new PvUvSetAggFunc, new PvUvResWindowFunc)
 
 
     pvUvStream
@@ -128,7 +129,7 @@ object PvUvCal {
     }
   }
 
-  class PvUvSetWindowFunc extends WindowFunction[PvUvOUT, PvUvOUT, String, TimeWindow] {
+  class PvUvResWindowFunc extends WindowFunction[PvUvOUT, PvUvOUT, String, TimeWindow] {
     override def apply(key: String,
                        window: TimeWindow,
                        input: Iterable[PvUvOUT],
@@ -141,8 +142,94 @@ object PvUvCal {
     }
   }
 
+  case class PvUvRoaringBitmapACC(sid: String, pv: Long, uv: Long, uidRB: RoaringBitmap)
+
+  def uvRoaringBitmapStata(args: Array[String]): Unit = {
+    val env = getEnv()
+    val dataStream = getDataStream(env)
+
+    val pvUvStream = dataStream
+      .keyBy(_.sid)
+      .timeWindow(Time.days(1))
+      .aggregate(new PvUvRoaringBitmapAggFunc, new PvUvResWindowFunc)
+
+
+    pvUvStream
+      .filter(r => (r.uv > 1) && (r.pv > r.uv))
+      .print()
+
+    val sink: StreamingFileSink[String] = getFileSink("uvRoaringBitmapStata")
+    pvUvStream
+      .filter(r => (r.uv > 1) && (r.pv > r.uv))
+      .map(x => gson.toJson(x))
+      .addSink(sink)
+
+    env.execute("uv job")
+
+  }
+
+  def hash(uid: String, size: Long): Long = {
+    MurmurHash.hash(uid.getBytes, 127) & (size - 1)
+  }
+
+  class PvUvRoaringBitmapAggFunc extends AggregateFunction[UserBehavior, PvUvRoaringBitmapACC, PvUvOUT] {
+    val bmSize = 1 << 25
+
+    override def createAccumulator(): PvUvRoaringBitmapACC = PvUvRoaringBitmapACC("", 0, 0, new RoaringBitmap())
+
+    override def add(in: UserBehavior, acc: PvUvRoaringBitmapACC): PvUvRoaringBitmapACC = {
+      val sid = if (acc.sid.nonEmpty) acc.sid else in.sid
+      var uv = acc.uv
+      val idx = hash(in.uid, bmSize).toInt
+
+      if (!acc.uidRB.contains(idx)) {
+        acc.uidRB.add(idx)
+        uv += 1
+      }
+
+      PvUvRoaringBitmapACC(sid, acc.pv + 1, uv, acc.uidRB)
+    }
+
+    override def getResult(acc: PvUvRoaringBitmapACC): PvUvOUT = PvUvOUT("", acc.sid, acc.pv, acc.uv)
+
+    override def merge(acc: PvUvRoaringBitmapACC, acc1: PvUvRoaringBitmapACC): PvUvRoaringBitmapACC = {
+      val sid = if (acc.sid.nonEmpty) acc.sid else acc1.sid
+      val tmpRBM = RoaringBitmap.or(acc.uidRB, acc1.uidRB)
+
+      PvUvRoaringBitmapACC(sid, acc.pv + acc1.pv, tmpRBM.getLongCardinality, tmpRBM)
+
+    }
+  }
+
+  def debug(args: Array[String]): Unit = {
+    val rmp = new RoaringBitmap()
+    rmp.add(1000L, 1200L)
+    //println(rmp.select(3))
+    //println(rmp.contains(7))
+    println(rmp.contains(1001))
+    println("-" + rmp.add(1001))
+    println(rmp.contains(1001))
+    //rmp.add(1)
+    //println(rmp.select(3))
+
+    val rmp2 = new RoaringBitmap()
+    rmp2.add(900L, 1100L)
+
+    val rmp3 = RoaringBitmap.or(rmp, rmp2)
+    //val rmp4 = rmp.and(rmp2)
+
+    println(rmp3.contains(900))
+    println(rmp3.contains(1101))
+
+    println(rmp.getLongCardinality)
+    println(rmp2.getLongCardinality)
+    println(rmp3.getLongCardinality)
+    //println(rmp4.getLongCardinality)
+  }
+
   def main(args: Array[String]): Unit = {
     uvSetSata(args)
+    uvRoaringBitmapStata(args)
   }
 
 }
