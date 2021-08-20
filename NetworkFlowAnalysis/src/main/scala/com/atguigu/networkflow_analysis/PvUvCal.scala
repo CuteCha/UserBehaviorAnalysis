@@ -27,6 +27,7 @@ import net.agkn.hll.HLL
 
 import java.io.File
 import scala.collection.JavaConverters._
+import scala.io.Source
 
 object PvUvCal {
   val gson = new Gson
@@ -276,8 +277,8 @@ object PvUvCal {
 
     val pvUvStream = dataStream
       .keyBy(_.sid)
-      .timeWindow(Time.minutes(5))
-      .aggregate(new PvUvRedisHLLAggFunc, new PvUvRedisProcWindowFunc)
+      .timeWindow(Time.minutes(5L))
+      .aggregate(new PvUvRedisHLLAggFunc, new PvUvRedisProcWindowFunc(5L))
 
 
     pvUvStream
@@ -286,7 +287,7 @@ object PvUvCal {
 
     val sink: StreamingFileSink[String] = getFileSink("uvRedisHLLStata")
     pvUvStream
-      //.filter(r => (r.uv > 1) && (r.pv > r.uv))
+      .filter(r => (r.uv > 1) && (r.pv > r.uv))
       .map(x => gson.toJson(x))
       .addSink(sink)
 
@@ -310,23 +311,26 @@ object PvUvCal {
     }
   }
 
-  class PvUvRedisProcWindowFunc extends ProcessWindowFunction[PvUvRedisHLLOUT, PvUvOUT, String, TimeWindow] {
+  class PvUvRedisProcWindowFunc(t: Long) extends ProcessWindowFunction[PvUvRedisHLLOUT, PvUvOUT, String, TimeWindow] {
     lazy val jedis = RedisTools.getPool.getResource
     val ttlMin = 24 * 60 * 60
     val ttlDay = 1 * 60 * 60
+    val dayWindowCnt = 24 * 60 / t
+    val deltaTime = t * 60 * 1000L
 
     override def process(key: String,
                          context: Context,
                          elements: Iterable[PvUvRedisHLLOUT],
                          out: Collector[PvUvOUT]): Unit = {
-      val windowStart = context.window.getStart
+      //val windowStart = context.window.getStart
       val windowEnd = context.window.getEnd
       val record = elements.head
       val sid = record.sid
-      val deltaTime = windowEnd - windowStart
-      val dayWindowCnt = 24 * 60 / deltaTime
-      val latestDayWindowEnds = (0L until dayWindowCnt).map(i => (windowEnd - i * deltaTime).toString)
+      //val deltaTime = windowEnd - windowStart
+      //val dayWindowCnt = 24 * 60 / (deltaTime / 1000 / 60)
+      val latestDayWindowEnds = (0L until dayWindowCnt).toList.map(i => (windowEnd - i * deltaTime).toString)
       val latestDayUvKeys = latestDayWindowEnds.map(x => s"${sid}_${x}_min_uv")
+      val dayStart = latestDayWindowEnds.last.toLong - deltaTime //windowEnd - dayWindowCnt * deltaTime
 
       val currPrefix = s"${sid}_${windowEnd}"
       val currMinUvKey = s"${currPrefix}_min_uv"
@@ -336,7 +340,7 @@ object PvUvCal {
       jedis.pfadd(currMinUvKey, record.uidSet.toList: _*)
       jedis.set(currMinPvKey, record.pv.toString)
 
-      jedis.pfmerge(currDayUvKey, latestDayUvKeys.toList: _*)
+      jedis.pfmerge(currDayUvKey, latestDayUvKeys: _*)
       val uv = jedis.pfcount(currDayUvKey)
       val pv = latestDayWindowEnds.map(x => {
         val tpv = jedis.get(s"${sid}_${x}_min_pv")
@@ -347,7 +351,7 @@ object PvUvCal {
       jedis.expire(currMinPvKey, ttlMin)
       jedis.expire(currDayUvKey, ttlDay)
 
-      out.collect(PvUvOUT(tsToDt(windowStart) + " ~ " + tsToDt(windowEnd), sid, pv, uv))
+      out.collect(PvUvOUT(tsToDt(dayStart) + " ~ " + tsToDt(windowEnd), sid, pv, uv))
 
     }
   }
@@ -426,6 +430,44 @@ object PvUvCal {
     jedis.pfmerge("s1", valKeys: _*)
     valKeys.foreach(x => println(jedis.pfcount(x)))
     println(jedis.pfcount("s1"))
+
+
+  }
+
+  def rHllDebug03(args: Array[String]): Unit = {
+    //val windowEnd = dtToTs("2017-11-26 09:15:00")
+    //val windowStart = dtToTs("2017-11-26 09:10:00")
+    //val deltaTime = windowEnd - windowStart
+    //val dayWindowCnt = 24 * 60 / (deltaTime / 1000 / 60)
+    //val latestDayWindowEnds = (0L until dayWindowCnt).toList.map(i => (windowEnd - i * deltaTime).toString)
+    //println(windowEnd)
+    //println(windowStart)
+    //println(deltaTime)
+    //println(latestDayWindowEnds)
+    //println(tsToDt(latestDayWindowEnds.last.toLong))
+    //PvUvOUT(2017-11-25 13:40:00 ~ 2017-11-26 13:40:00,3973743,12,11)
+    //PvUvOUT(2017-11-25 13:40:00 ~ 2017-11-26 13:40:00,1559765,3,2)
+    //PvUvOUT(2017-11-25 13:45:00 ~ 2017-11-26 13:45:00,2923320,9,8)
+    //PvUvOUT(2017-11-25 13:40:00 ~ 2017-11-26 13:40:00,4505406,4,3)
+    //PvUvOUT(2017-11-25 13:40:00 ~ 2017-11-26 13:40:00,138964,43,41)
+    //PvUvOUT(2017-11-25 13:40:00 ~ 2017-11-26 13:40:00,3973743,12,11)
+
+    val startTime = 1511588400000L
+    val endTime = 1511674800000L
+    val resource = getClass.getResource("/UserBehavior.csv")
+    val res = Source.fromFile(resource.getPath).getLines()
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .map(line => {
+        val arr = line.split(",")
+        UserBehavior(arr(0), arr(1), arr(2), arr(3), arr(4).toLong * 1000L)
+      })
+      .filter(r => r.sid.equals("138964") && (r.ts >= startTime && r.ts < endTime))
+
+    val res2 = res.toList
+    println(res2)
+    println(res2.size)
+    println(res2.map(_.uid).toSet.size)
 
 
   }
