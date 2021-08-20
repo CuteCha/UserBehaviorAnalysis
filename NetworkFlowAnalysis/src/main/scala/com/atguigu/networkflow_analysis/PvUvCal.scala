@@ -147,6 +147,19 @@ object PvUvCal {
     }
   }
 
+  class PvUvResProcWindowFunc extends ProcessWindowFunction[PvUvOUT, PvUvOUT, String, TimeWindow] {
+    override def process(key: String,
+                         context: Context,
+                         elements: Iterable[PvUvOUT],
+                         out: Collector[PvUvOUT]): Unit = {
+      val windowEnd = context.window.getEnd
+      val dt = tsToDt(windowEnd)
+      val record = elements.head
+
+      out.collect(PvUvOUT(dt, record.sid, record.pv, record.uv))
+    }
+  }
+
   case class PvUvRoaringBitmapACC(sid: String, pv: Long, uv: Long, uidRB: RoaringBitmap)
 
   def uvRoaringBitmapStata(args: Array[String]): Unit = {
@@ -253,6 +266,92 @@ object PvUvCal {
     }
   }
 
+  case class PvUvRedisHLLACC(sid: String, pv: Long, uv: Long, uidSet: Set[String])
+
+  case class PvUvRedisHLLOUT(sid: String, pv: Long, uv: Long, uidSet: Set[String])
+
+  def uvRedisHLLStata(args: Array[String]): Unit = {
+    val env = getEnv()
+    val dataStream = getDataStream(env)
+
+    val pvUvStream = dataStream
+      .keyBy(_.sid)
+      .timeWindow(Time.minutes(5))
+      .aggregate(new PvUvRedisHLLAggFunc, new PvUvRedisProcWindowFunc)
+
+
+    pvUvStream
+      .filter(r => (r.uv > 1) && (r.pv > r.uv))
+      .print()
+
+    val sink: StreamingFileSink[String] = getFileSink("uvRedisHLLStata")
+    pvUvStream
+      //.filter(r => (r.uv > 1) && (r.pv > r.uv))
+      .map(x => gson.toJson(x))
+      .addSink(sink)
+
+    env.execute("uv job")
+
+  }
+
+  class PvUvRedisHLLAggFunc extends AggregateFunction[UserBehavior, PvUvRedisHLLACC, PvUvRedisHLLOUT] {
+    override def createAccumulator(): PvUvRedisHLLACC = PvUvRedisHLLACC("", 0, 0, Set[String]())
+
+    override def add(in: UserBehavior, acc: PvUvRedisHLLACC): PvUvRedisHLLACC = {
+      val sid = if (acc.sid.nonEmpty) acc.sid else in.sid
+      PvUvRedisHLLACC(sid, acc.pv + 1, 0, acc.uidSet + in.uid)
+    }
+
+    override def getResult(acc: PvUvRedisHLLACC): PvUvRedisHLLOUT = PvUvRedisHLLOUT(acc.sid, acc.pv, 0, acc.uidSet)
+
+    override def merge(acc: PvUvRedisHLLACC, acc1: PvUvRedisHLLACC): PvUvRedisHLLACC = {
+      val sid = if (acc.sid.nonEmpty) acc.sid else acc1.sid
+      PvUvRedisHLLACC(sid, acc.pv + acc1.pv, 0, acc.uidSet ++ acc1.uidSet)
+    }
+  }
+
+  class PvUvRedisProcWindowFunc extends ProcessWindowFunction[PvUvRedisHLLOUT, PvUvOUT, String, TimeWindow] {
+    lazy val jedis = RedisTools.getPool.getResource
+    val ttlMin = 24 * 60 * 60
+    val ttlDay = 1 * 60 * 60
+
+    override def process(key: String,
+                         context: Context,
+                         elements: Iterable[PvUvRedisHLLOUT],
+                         out: Collector[PvUvOUT]): Unit = {
+      val windowStart = context.window.getStart
+      val windowEnd = context.window.getEnd
+      val record = elements.head
+      val sid = record.sid
+      val deltaTime = windowEnd - windowStart
+      val dayWindowCnt = 24 * 60 / deltaTime
+      val latestDayWindowEnds = (0L until dayWindowCnt).map(i => (windowEnd - i * deltaTime).toString)
+      val latestDayUvKeys = latestDayWindowEnds.map(x => s"${sid}_${x}_min_uv")
+
+      val currPrefix = s"${sid}_${windowEnd}"
+      val currMinUvKey = s"${currPrefix}_min_uv"
+      val currMinPvKey = s"${currPrefix}_min_pv"
+      val currDayUvKey = s"${currPrefix}_day_uv"
+
+      jedis.pfadd(currMinUvKey, record.uidSet.toList: _*)
+      jedis.set(currMinPvKey, record.pv.toString)
+
+      jedis.pfmerge(currDayUvKey, latestDayUvKeys.toList: _*)
+      val uv = jedis.pfcount(currDayUvKey)
+      val pv = latestDayWindowEnds.map(x => {
+        val tpv = jedis.get(s"${sid}_${x}_min_pv")
+        if (tpv == null) 0L else tpv.toLong
+      }).sum
+
+      jedis.expire(currMinUvKey, ttlMin)
+      jedis.expire(currMinPvKey, ttlMin)
+      jedis.expire(currDayUvKey, ttlDay)
+
+      out.collect(PvUvOUT(tsToDt(windowStart) + " ~ " + tsToDt(windowEnd), sid, pv, uv))
+
+    }
+  }
+
 
   def rmbDebug(args: Array[String]): Unit = {
     val rmp = new RoaringBitmap()
@@ -317,11 +416,14 @@ object PvUvCal {
     val s1d1 = Set("u01", "u02", "u05", "u03", "u01", "u07", "u02")
     val s1d2 = Set("u11", "u19", "u15", "u11", "u11", "u17", "u02")
 
-    s1d1.foreach(x => jedis.pfadd("s1d1", x))
+    //s1d1.foreach(x => jedis.pfadd("s1d1", x))
     s1d2.foreach(x => jedis.pfadd("s1d2", x))
 
+    jedis.pfadd("s1d1", s1d1.toList: _*)
+
     val valKeys = List("s1d1", "s1d2")
-    valKeys.foreach(x => jedis.pfmerge("s1", x))
+    //valKeys.foreach(x => jedis.pfmerge("s1", x))
+    jedis.pfmerge("s1", valKeys: _*)
     valKeys.foreach(x => println(jedis.pfcount(x)))
     println(jedis.pfcount("s1"))
 
@@ -330,9 +432,7 @@ object PvUvCal {
 
 
   def main(args: Array[String]): Unit = {
-    uvSetSata(args)
-    uvRoaringBitmapStata(args)
-    uvHyperLogLogStata(args)
+    uvRedisHLLStata(args)
   }
 
 }
