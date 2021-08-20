@@ -23,6 +23,7 @@ import org.apache.flink.core.fs.Path
 import org.apache.flink.api.common.serialization.SimpleStringEncoder
 import org.apache.flink.streaming.api.functions.sink.filesystem.StreamingFileSink
 import org.roaringbitmap.RoaringBitmap
+import net.agkn.hll.HLL
 
 import java.io.File
 import scala.collection.JavaConverters._
@@ -40,6 +41,10 @@ object PvUvCal {
 
   def dtToTs(dt: String): Long = {
     new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").parse(dt).getTime
+  }
+
+  def hash(uid: String, size: Long): Long = {
+    MurmurHash.hash(uid.getBytes, 127) & (size - 1)
   }
 
   def getOutPath(dir: String): String = {
@@ -91,7 +96,7 @@ object PvUvCal {
 
     val pvUvStream = dataStream
       .keyBy(_.sid)
-      .timeWindow(Time.days(1))
+      .timeWindow(Time.minutes(30), Time.minutes(5))
       .aggregate(new PvUvSetAggFunc, new PvUvResWindowFunc)
 
 
@@ -150,7 +155,7 @@ object PvUvCal {
 
     val pvUvStream = dataStream
       .keyBy(_.sid)
-      .timeWindow(Time.days(1))
+      .timeWindow(Time.minutes(30), Time.minutes(5))
       .aggregate(new PvUvRoaringBitmapAggFunc, new PvUvResWindowFunc)
 
 
@@ -166,10 +171,6 @@ object PvUvCal {
 
     env.execute("uv job")
 
-  }
-
-  def hash(uid: String, size: Long): Long = {
-    MurmurHash.hash(uid.getBytes, 127) & (size - 1)
   }
 
   class PvUvRoaringBitmapAggFunc extends AggregateFunction[UserBehavior, PvUvRoaringBitmapACC, PvUvOUT] {
@@ -201,7 +202,59 @@ object PvUvCal {
     }
   }
 
-  def debug(args: Array[String]): Unit = {
+  case class PvUvHyperLogLogACC(sid: String, pv: Long, uv: Long, uidHLL: HLL)
+
+  def uvHyperLogLogStata(args: Array[String]): Unit = {
+    val env = getEnv()
+    val dataStream = getDataStream(env)
+
+    val pvUvStream = dataStream
+      .keyBy(_.sid)
+      .timeWindow(Time.minutes(30), Time.minutes(5))
+      .aggregate(new PvUvHyperLogLogAggFunc, new PvUvResWindowFunc)
+
+
+    pvUvStream
+      .filter(r => (r.uv > 1) && (r.pv > r.uv))
+      .print()
+
+    val sink: StreamingFileSink[String] = getFileSink("uvHyperLogLogStata")
+    pvUvStream
+      .filter(r => (r.uv > 1) && (r.pv > r.uv))
+      .map(x => gson.toJson(x))
+      .addSink(sink)
+
+    env.execute("uv job")
+
+  }
+
+  class PvUvHyperLogLogAggFunc extends AggregateFunction[UserBehavior, PvUvHyperLogLogACC, PvUvOUT] {
+    private val bmSize = 1 << 25
+    private val log2m = 14
+    private val regWidth = 6
+
+    override def createAccumulator(): PvUvHyperLogLogACC = PvUvHyperLogLogACC("", 0, 0, new HLL(log2m, regWidth))
+
+    override def add(in: UserBehavior, acc: PvUvHyperLogLogACC): PvUvHyperLogLogACC = {
+      val sid = if (acc.sid.nonEmpty) acc.sid else in.sid
+      val idx = hash(in.uid, bmSize).toInt
+      acc.uidHLL.addRaw(idx)
+
+      PvUvHyperLogLogACC(sid, acc.pv + 1, acc.uidHLL.cardinality(), acc.uidHLL)
+    }
+
+    override def getResult(acc: PvUvHyperLogLogACC): PvUvOUT = PvUvOUT("", acc.sid, acc.pv, acc.uv)
+
+    override def merge(acc: PvUvHyperLogLogACC, acc1: PvUvHyperLogLogACC): PvUvHyperLogLogACC = {
+      val sid = if (acc.sid.nonEmpty) acc.sid else acc1.sid
+      acc.uidHLL.union(acc1.uidHLL)
+
+      PvUvHyperLogLogACC(sid, acc.pv + acc1.pv, acc.uidHLL.cardinality(), acc.uidHLL)
+    }
+  }
+
+
+  def rmbDebug(args: Array[String]): Unit = {
     val rmp = new RoaringBitmap()
     rmp.add(1000L, 1200L)
     //println(rmp.select(3))
@@ -227,9 +280,59 @@ object PvUvCal {
     //println(rmp4.getLongCardinality)
   }
 
+  def hllDebug01(args: Array[String]): Unit = {
+    val hll = new HLL(14, 6)
+    hll.addRaw(1001L)
+    println(hll.cardinality())
+
+    hll.addRaw(1001L)
+    println(hll.cardinality())
+
+    val hll2 = new HLL(14, 6)
+    hll2.addRaw(2001L)
+
+    hll.union(hll2)
+
+    println(hll.cardinality())
+  }
+
+  def hllDebug02(args: Array[String]): Unit = {
+    val jedis = RedisTools.getPool.getResource
+
+    jedis.pfadd("s1_dt0", "u01", "u02", "u05", "u03", "u01", "u07", "u02")
+    jedis.pfadd("s1_dt1", "u11", "u19", "u15", "u11", "u11", "u17", "u02")
+    jedis.pfadd("s2_dt1", "u03", "u09", "u05", "u01", "u01", "u07", "u02")
+
+    jedis.pfmerge("s1", "s1_dt0", "s1_dt1")
+
+    jedis.expire("s1_dt0", 100)
+    jedis.expire("s1_dt1", 100)
+    jedis.expire("s2_dt1", 100)
+    jedis.expire("s1", 100)
+
+    println(s"s1_dt0: ${jedis.pfcount("s1_dt0")}")
+    println(s"s1_dt1: ${jedis.pfcount("s1_dt1")}")
+    println(s"s1: ${jedis.pfcount("s1")}")
+
+    val s1d1 = Set("u01", "u02", "u05", "u03", "u01", "u07", "u02")
+    val s1d2 = Set("u11", "u19", "u15", "u11", "u11", "u17", "u02")
+
+    s1d1.foreach(x => jedis.pfadd("s1d1", x))
+    s1d2.foreach(x => jedis.pfadd("s1d2", x))
+
+    val valKeys = List("s1d1", "s1d2")
+    valKeys.foreach(x => jedis.pfmerge("s1", x))
+    valKeys.foreach(x => println(jedis.pfcount(x)))
+    println(jedis.pfcount("s1"))
+
+
+  }
+
+
   def main(args: Array[String]): Unit = {
     uvSetSata(args)
     uvRoaringBitmapStata(args)
+    uvHyperLogLogStata(args)
   }
 
 }
