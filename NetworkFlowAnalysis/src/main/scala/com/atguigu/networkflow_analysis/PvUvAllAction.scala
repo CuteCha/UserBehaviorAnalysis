@@ -3,6 +3,7 @@ package com.atguigu.networkflow_analysis
 import com.google.gson.Gson
 import org.apache.flink.api.common.functions.AggregateFunction
 import org.apache.flink.api.common.serialization.SimpleStringEncoder
+import org.apache.flink.configuration.Configuration
 import org.apache.flink.core.fs.Path
 import org.apache.flink.streaming.api.TimeCharacteristic
 import org.apache.flink.streaming.api.functions.sink.filesystem.StreamingFileSink
@@ -166,7 +167,13 @@ object PvUvAllAction {
     var windowEnd: Long = _
     var latestAggWindowEnds: List[String] = _
 
-    lazy val jedis = RedisTools.getPool.getResource
+    //lazy val jedis = RedisTools.getPool.getResource
+    @transient private var jedis: Jedis = _
+
+    override def open(parameters: Configuration): Unit = {
+      super.open(parameters)
+      jedis = RedisTools.getPool.getResource
+    }
 
     def calActionOUT(actionACC: ActionACC, eventType: String): ActionOUT = {
       val currEidSizeSid = s"${eventType}_${calSize}_${sid}"
