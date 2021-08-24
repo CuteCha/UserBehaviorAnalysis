@@ -20,9 +20,9 @@ case class RedisTools2(host: String, port: Int, timeout: Int) {
       pool = new JedisPool(poolConfig, host, port, timeout)
 
       val hook = new Thread {
-        override def run = pool.destroy()
+        override def run(): Unit = pool.destroy()
       }
-      sys.addShutdownHook(hook.run)
+      sys.addShutdownHook(hook.run())
     }
   }
 
