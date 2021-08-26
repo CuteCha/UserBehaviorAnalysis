@@ -469,6 +469,8 @@ object PvUvCal {
     println(res2.size)
     println(res2.map(_.uid).toSet.size)
 
+    println(this.getClass.getName)
+
 
   }
 
