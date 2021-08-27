@@ -1,7 +1,7 @@
 package com.atguigu.networkflow_analysis
 
 import org.apache.commons.pool2.impl.GenericObjectPoolConfig
-import redis.clients.jedis.{Jedis, JedisPool, JedisPoolConfig, JedisShardInfo, ShardedJedis, ShardedJedisPool}
+import redis.clients.jedis.{Jedis, JedisPool, JedisPoolConfig, JedisShardInfo, ShardedJedis, ShardedJedisPool, JedisCluster, HostAndPort}
 
 import java.util
 
@@ -70,6 +70,42 @@ case class RedisTools3(hostPort: List[(String, Int)], timeout: Int) {
     }
 
     pool
+  }
+
+}
+
+
+case class RedisTools4(hostPort: List[(String, Int)], timeout: Int) {
+  @transient private var jedis: JedisCluster = _
+
+  private def makeJedisCluster(hostPort: List[(String, Int)], timeout: Int): Unit = {
+    if (jedis == null) {
+      val config = new JedisPoolConfig()
+      config.setMaxTotal(1024) // 最大连接数
+      config.setMaxIdle(100) // 最大空闲连接数
+      config.setMinIdle(10)
+      config.setTestOnBorrow(true) // 检查连接可用性, 确保获取的redis实例可用
+      config.setTestOnReturn(false)
+      config.setMaxWaitMillis(10000)
+
+      val nodes = new util.HashSet[HostAndPort]()
+      hostPort.foreach { case (host, port) => nodes.add(new HostAndPort(host, port)) }
+
+      jedis = new JedisCluster(nodes, timeout, config)
+
+      val hook = new Thread {
+        override def run(): Unit = jedis.close()
+      }
+      sys.addShutdownHook(hook.run())
+    }
+  }
+
+  def getJedisCluster: JedisCluster = {
+    if (jedis == null) {
+      makeJedisCluster(hostPort, timeout)
+    }
+
+    jedis
   }
 
 }
