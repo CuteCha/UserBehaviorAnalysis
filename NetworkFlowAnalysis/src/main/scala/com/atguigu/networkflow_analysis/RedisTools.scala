@@ -22,7 +22,7 @@ object RedisTools extends Serializable {
   def init(redisHost: String, redisPort: Int, redisTimeout: Int): Unit = {
     if (pool == null) {
       val poolConfig = new GenericObjectPoolConfig()
-      poolConfig.setMaxTotal(1024)  // 最大连接数
+      poolConfig.setMaxTotal(1024) // 最大连接数
       poolConfig.setMaxIdle(100) // 最大空闲连接数
       poolConfig.setMinIdle(10)
       poolConfig.setTestOnBorrow(true) // 检查连接可用性, 确保获取的redis实例可用
@@ -49,6 +49,20 @@ object RedisTools extends Serializable {
   def test(args: Array[String]): Unit = {
     val jedis = getPool.getResource
     jedis.set("xxx", "a2")
+
+  }
+
+  def test02(args: Array[String]): Unit = {
+    val jedis = getPool.getResource
+    val pipeline = jedis.pipelined()
+    (0 to 10).foreach(j => {
+      pipeline.set("k_" + j, "pipeline_value_" + j)
+    })
+
+    val res = pipeline.syncAndReturnAll()
+    // pipeline.sync(); //这里只执行同步，但是不返回结果
+    // pipeline.syncAndReturnAll ();将返回执行过的命令返回的List列表结果
+    println(res)
 
   }
 
